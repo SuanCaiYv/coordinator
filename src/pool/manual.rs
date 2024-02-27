@@ -3,7 +3,7 @@ use std::{
     time::Duration,
 };
 
-use async_oneshot::Sender as OneshotSender;
+use async_oneshot::{Sender as OneshotSender, Receiver as OneshotReceiver};
 use crossbeam_channel::TrySendError;
 use flume::Sender;
 use sysinfo::{System, SystemExt};
@@ -39,7 +39,7 @@ pub(self) struct Worker {
 impl Worker {
     pub(self) fn new<T: 'static + Send + Sync>(
         id: usize,
-        task_receiver: crossbeam_channel::Receiver<Task<T>>,
+        task_receiver: crossbeam_channel::Receiver<Option<Task<T>>>,
     ) -> Self {
         let handle = thread::Builder::new()
             .stack_size(1024 * 1024 * 2)
@@ -47,7 +47,11 @@ impl Worker {
             .spawn(move || loop {
                 match task_receiver.recv_timeout(Duration::from_secs(61)) {
                     Ok(task) => {
-                        task.run();
+                        if let Some(task) = task {
+                            task.run();
+                        } else {
+                            break;
+                        }
                     }
                     Err(_) => {
                         break;
@@ -64,7 +68,7 @@ impl Worker {
 
 impl Drop for Worker {
     fn drop(&mut self) {
-        self.thread.take().unwrap().join().unwrap();
+        // self.thread.take().unwrap().join().unwrap();
     }
 }
 
@@ -72,6 +76,7 @@ impl Drop for Worker {
 pub struct ThreadPool<T: 'static> {
     _workers_handle: Option<JoinHandle<()>>,
     inner_tx: Sender<Option<Task<T>>>,
+    shutdown_notify: Option<OneshotReceiver<()>>,
 }
 
 impl<T: 'static + Sync + Send> ThreadPool<T> {
@@ -100,7 +105,7 @@ impl<T: 'static + Sync + Send> ThreadPool<T> {
             // the backend thread which manage the workers
             let workers_handle = thread::spawn(move || {
                 for i in 0..default_size {
-                    let (task_tx, task_rx) = crossbeam_channel::bounded::<Task<T>>(queue_size);
+                    let (task_tx, task_rx) = crossbeam_channel::bounded(queue_size);
                     let worker = Worker::new(i, task_rx);
 
                     workers.push(worker);
@@ -114,6 +119,9 @@ impl<T: 'static + Sync + Send> ThreadPool<T> {
                         match inner_rx.recv() {
                             Ok(task) => {
                                 if task.is_none() {
+                                    for sender in task_senders {
+                                        _ = sender.send(None);
+                                    }
                                     break;
                                 }
                                 task.unwrap()
@@ -137,15 +145,15 @@ impl<T: 'static + Sync + Send> ThreadPool<T> {
                     if index != usize::MAX {
                         let worker_id = workers[index].id;
                         debug!("send task to idle worker: {}", worker_id);
-                        if let Err(e) = task_senders[index].try_send(task) {
+                        if let Err(e) = task_senders[index].try_send(Some(task)) {
                             match e {
-                                TrySendError::Disconnected(task) => {
+                                TrySendError::Disconnected(mut task) => {
                                     task_senders.remove(index);
                                     workers.remove(index);
-                                    previous = Some(task);
+                                    previous = Some(task.take().unwrap());
                                 }
-                                TrySendError::Full(task) => {
-                                    previous = Some(task);
+                                TrySendError::Full(mut task) => {
+                                    previous = Some(task.take().unwrap());
                                 }
                             }
                             continue;
@@ -160,17 +168,17 @@ impl<T: 'static + Sync + Send> ThreadPool<T> {
                             let worker = Worker::new(new_worker_id, task_rx);
 
                             workers.push(worker);
-                            _ = task_tx.send(task);
+                            _ = task_tx.send(Some(task));
                             task_senders.push(task_tx);
                         } else {
                             // third, send task to the worker which has the most capacity.
-                            match task_senders[index].try_send(task) {
+                            match task_senders[index].try_send(Some(task)) {
                                 Ok(_) => {
                                     debug!("buffer: {} available", workers[index].id);
                                 }
                                 Err(e) => {
                                     match e {
-                                        TrySendError::Full(task) => {
+                                        TrySendError::Full(mut task) => {
                                             // last, create more threads before reach max size.
                                             if workers.len() < max_size {
                                                 let new_worker_id =
@@ -193,13 +201,13 @@ impl<T: 'static + Sync + Send> ThreadPool<T> {
                                                 // if let Err(e) = task_senders[idx].send(task) {
                                                 //     println!("send task error: {:?}", e);
                                                 // }
-                                                task.run();
+                                                task.take().unwrap().run();
                                             }
                                         }
-                                        TrySendError::Disconnected(task) => {
+                                        TrySendError::Disconnected(mut task) => {
                                             task_senders.remove(index);
                                             workers.remove(index);
-                                            previous = Some(task);
+                                            previous = Some(task.take().unwrap());
                                             continue;
                                         }
                                     }
@@ -212,11 +220,13 @@ impl<T: 'static + Sync + Send> ThreadPool<T> {
             Self {
                 _workers_handle: Some(workers_handle),
                 inner_tx,
+                shutdown_notify: None,
             }
         } else {
+            let (mut shutdown_tx, shutdown_rx) = async_oneshot::oneshot();
             tokio::spawn(async move {
                 for i in 0..default_size {
-                    let (task_tx, task_rx) = crossbeam_channel::bounded::<Task<T>>(queue_size);
+                    let (task_tx, task_rx) = crossbeam_channel::bounded(queue_size);
                     let worker = Worker::new(i, task_rx);
 
                     workers.push(worker);
@@ -230,11 +240,16 @@ impl<T: 'static + Sync + Send> ThreadPool<T> {
                         match inner_rx.recv_async().await {
                             Ok(task) => {
                                 if task.is_none() {
+                                    for sender in task_senders {
+                                        _ = sender.send(None);
+                                    }
                                     break;
                                 }
                                 task.unwrap()
                             }
-                            Err(_) => break,
+                            Err(_) => {
+                                break;
+                            }
                         }
                     };
 
@@ -253,15 +268,15 @@ impl<T: 'static + Sync + Send> ThreadPool<T> {
                     if index != usize::MAX {
                         let worker_id = workers[index].id;
                         debug!("send task to idle worker: {}", worker_id);
-                        if let Err(e) = task_senders[index].try_send(task) {
+                        if let Err(e) = task_senders[index].try_send(Some(task)) {
                             match e {
-                                TrySendError::Disconnected(task) => {
+                                TrySendError::Disconnected(mut task) => {
                                     task_senders.remove(index);
                                     workers.remove(index);
-                                    previous = Some(task);
+                                    previous = Some(task.take().unwrap());
                                 }
-                                TrySendError::Full(task) => {
-                                    previous = Some(task);
+                                TrySendError::Full(mut task) => {
+                                    previous = Some(task.take().unwrap());
                                 }
                             }
                             continue;
@@ -276,17 +291,17 @@ impl<T: 'static + Sync + Send> ThreadPool<T> {
                             let worker = Worker::new(new_worker_id, task_rx);
 
                             workers.push(worker);
-                            _ = task_tx.try_send(task);
+                            _ = task_tx.try_send(Some(task));
                             task_senders.push(task_tx);
                         } else {
                             // third, send task to the worker which has the most capacity.
-                            match task_senders[index].try_send(task) {
+                            match task_senders[index].try_send(Some(task)) {
                                 Ok(_) => {
                                     debug!("buffer: {} available", workers[index].id);
                                 }
                                 Err(e) => {
                                     match e {
-                                        TrySendError::Full(task) => {
+                                        TrySendError::Full(mut task) => {
                                             // last, create more threads before reach max size.
                                             if workers.len() < max_size {
                                                 let new_worker_id =
@@ -309,13 +324,13 @@ impl<T: 'static + Sync + Send> ThreadPool<T> {
                                                 // if let Err(e) = task_senders[idx].send(task) {
                                                 //     println!("send task error: {:?}", e);
                                                 // }
-                                                task.run();
+                                                task.take().unwrap().run();
                                             }
                                         }
-                                        TrySendError::Disconnected(task) => {
+                                        TrySendError::Disconnected(mut task) => {
                                             task_senders.remove(index);
                                             workers.remove(index);
-                                            previous = Some(task);
+                                            previous = Some(task.take().unwrap());
                                             continue;
                                         }
                                     }
@@ -324,16 +339,16 @@ impl<T: 'static + Sync + Send> ThreadPool<T> {
                         }
                     }
                 }
+                shutdown_tx.send(()).unwrap();
             });
             Self {
                 _workers_handle: None,
                 inner_tx,
+                shutdown_notify: Some(shutdown_rx),
             }
         }
     }
 
-    /// if the cache queue for task is full, and number of threads reach the max_size,
-    /// then the call of this method will block until the cache queue is not full.
     #[allow(unused)]
     pub fn execute<F>(&self, f: F) -> anyhow::Result<T>
         where
@@ -342,7 +357,7 @@ impl<T: 'static + Sync + Send> ThreadPool<T> {
         return futures_lite::future::block_on(self.submit(f));
     }
 
-    /// if the cache queue is full and create more threads is not allow, the call will block on async context.
+    /// if the queue is full and create more threads is not allow, the call will block on async context.
     pub async fn submit<F>(&self, f: F) -> anyhow::Result<T>
         where
             F: FnOnce() -> T + Send + Sync + 'static,
@@ -356,10 +371,12 @@ impl<T: 'static + Sync + Send> ThreadPool<T> {
         }
         Ok(res.unwrap())
     }
-}
 
-impl<T> Drop for ThreadPool<T> {
-    fn drop(&mut self) {
-        self.inner_tx.try_send(None).unwrap();
+    /// used only for benchmark, cause single thread runtime will not wait for shutdown of all threads.
+    pub(crate) async fn exit(&mut self) {
+        self.inner_tx.send_async(None).await.unwrap();
+        if let Some(notify) = self.shutdown_notify.take() {
+            notify.await.unwrap();
+        }
     }
 }

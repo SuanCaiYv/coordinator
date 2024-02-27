@@ -147,6 +147,8 @@ impl<T> ThreadPool<T>
                 .stack_size(1024 * 1024 * 2)
                 .spawn(move || {
                     loop {
+                        // this number is from golang scheduler.
+                        // todo, make as alternative.
                         match inner_rx.recv_timeout(Duration::from_secs(61)) {
                             Ok(task) => {
                                 task.run();

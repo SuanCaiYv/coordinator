@@ -6,7 +6,7 @@ edition = "2021"
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
-tokio = { version = "1.32.0", features = ["rt"] }
+tokio = { version = "1.32.0", features = ["rt", "time"] }
 anyhow = "1.0.75"
 tracing = "0.1.35"
 tracing-subscriber = "0.3.15"
@@ -16,6 +16,7 @@ crossbeam-channel = "0.5.11"
 async-oneshot = "0.5.9"
 flume = {version = "0.11.0", features = ["async"]}
 futures-lite = "2.2.0"
+blocking = "1.5.1"
 
 [dev-dependencies]
 criterion = "0.3"
