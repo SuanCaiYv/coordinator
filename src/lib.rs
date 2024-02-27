@@ -47,6 +47,7 @@ pub fn test_manual() -> u64 {
                 let res = pool.submit(Box::new(move || i)).await.unwrap();
                 total += res;
             }
+            drop(pool); // drop the pool to ensure all tasks are finished
             // pool.exit().await;
             return total;
         });

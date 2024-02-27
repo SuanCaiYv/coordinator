@@ -68,12 +68,12 @@ impl Worker {
 
 impl Drop for Worker {
     fn drop(&mut self) {
-        // self.thread.take().unwrap().join().unwrap();
+        self.thread.take().unwrap().join().unwrap();
     }
 }
 
 /// a thread pool for block syscall
-pub struct ThreadPool<T: 'static> {
+pub struct ThreadPool<T: Send + Sync + 'static> {
     _workers_handle: Option<JoinHandle<()>>,
     inner_tx: Sender<Option<Task<T>>>,
     shutdown_notify: Option<OneshotReceiver<()>>,
@@ -378,5 +378,11 @@ impl<T: 'static + Sync + Send> ThreadPool<T> {
         if let Some(notify) = self.shutdown_notify.take() {
             notify.await.unwrap();
         }
+    }
+}
+
+impl<T: Send + Sync + 'static> Drop for ThreadPool<T> {
+    fn drop(&mut self) {
+        futures_lite::future::block_on(self.exit());
     }
 }
