@@ -388,6 +388,16 @@ impl<T: 'static + Sync + Send> ThreadPool<T> {
     }
 }
 
+impl Clone for ThreadPool<()> {
+    fn clone(&self) -> Self {
+        Self {
+            _workers_handle: None,
+            inner_tx: self.inner_tx.clone(),
+            shutdown_notify: None,
+        }
+    }
+}
+
 impl<T: Send + Sync + 'static> Drop for ThreadPool<T> {
     fn drop(&mut self) {
         futures_lite::future::block_on(self.shutdown());
