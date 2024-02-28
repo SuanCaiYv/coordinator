@@ -30,7 +30,6 @@ impl<T> Task<T> {
     }
 }
 
-#[derive(Clone)]
 pub struct ThreadPool<T: Send + Sync + 'static> {
     max_size: usize,
     scale_size: usize,
@@ -165,6 +164,19 @@ impl<T> ThreadPool<T>
         } else {
             self.current_size
                 .fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
+        }
+    }
+}
+
+impl<T: Send + Sync + 'static> Clone for ThreadPool<T> {
+    fn clone(&self) -> Self {
+        Self {
+            max_size: self.max_size,
+            scale_size: self.scale_size,
+            stack_size: self.stack_size,
+            current_size: self.current_size.clone(),
+            inner_tx: self.inner_tx.clone(),
+            inner_rx: self.inner_rx.clone(),
         }
     }
 }

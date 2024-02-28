@@ -388,7 +388,7 @@ impl<T: 'static + Sync + Send> ThreadPool<T> {
     }
 }
 
-impl Clone for ThreadPool<()> {
+impl<T: Send + Sync + 'static> Clone for ThreadPool<T> {
     fn clone(&self) -> Self {
         Self {
             _workers_handle: None,
