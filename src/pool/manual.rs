@@ -39,17 +39,20 @@ pub(self) struct Worker {
 impl Worker {
     pub(self) fn new<T: 'static + Send + Sync>(
         id: usize,
+        stack_size: usize,
         task_receiver: crossbeam_channel::Receiver<Option<Task<T>>>,
     ) -> Self {
         let handle = thread::Builder::new()
-            .stack_size(1024 * 1024 * 2)
-            .name(format!("thread-pool-worker-{}", id))
+            .stack_size(stack_size)
+            .name(format!("thread-pool-worker-{:03}", id))
             .spawn(move || loop {
+                // todo, make as alternative.
                 match task_receiver.recv_timeout(Duration::from_secs(61)) {
                     Ok(task) => {
                         if let Some(task) = task {
                             task.run();
                         } else {
+                            debug!("thread-pool-worker-{:03} shutdown", id);
                             break;
                         }
                     }
@@ -80,17 +83,20 @@ pub struct ThreadPool<T: Send + Sync + 'static> {
 }
 
 impl<T: 'static + Sync + Send> ThreadPool<T> {
-    /// cache_size: number of task on the fly.
-    /// scale_size: max number of threads when all workers are busy.
-    /// max_size: max number of threads.
+    /// - `scale_size`: max number of threads when all workers are busy.
+    /// - `queue_size`: number of task on the fly.
+    /// - `max_size`: max number of threads.
+    /// - `stack_size`: size of stack for each thread.
+    /// - `enable_background_thread`: if true, the thread pool will create a background thread to manage the workers.
     ///
     /// default size of thread created is equal to number of available cpu cores,
     /// when all workers are busy, new thread will be created until reach the scale size,
     /// when all workers with their sender be fully, create new thread until max size.
     pub fn new(
         scale_size: usize,
-        max_size: usize,
         queue_size: usize,
+        max_size: usize,
+        stack_size: usize,
         enable_background_thread: bool,
     ) -> Self {
         let mut sys = System::new();
@@ -106,7 +112,7 @@ impl<T: 'static + Sync + Send> ThreadPool<T> {
             let workers_handle = thread::spawn(move || {
                 for i in 0..default_size {
                     let (task_tx, task_rx) = crossbeam_channel::bounded(queue_size);
-                    let worker = Worker::new(i, task_rx);
+                    let worker = Worker::new(i, stack_size, task_rx);
 
                     workers.push(worker);
                     task_senders.push(task_tx);
@@ -165,7 +171,7 @@ impl<T: 'static + Sync + Send> ThreadPool<T> {
                             debug!("create new worker: {}", new_worker_id);
 
                             let (task_tx, task_rx) = crossbeam_channel::bounded(queue_size);
-                            let worker = Worker::new(new_worker_id, task_rx);
+                            let worker = Worker::new(new_worker_id, stack_size, task_rx);
 
                             workers.push(worker);
                             _ = task_tx.send(Some(task));
@@ -186,7 +192,7 @@ impl<T: 'static + Sync + Send> ThreadPool<T> {
                                                 debug!("create more worker: {}", new_worker_id);
                                                 let (task_tx, task_rx) =
                                                     crossbeam_channel::bounded(queue_size);
-                                                let worker = Worker::new(new_worker_id, task_rx);
+                                                let worker = Worker::new(new_worker_id, stack_size, task_rx);
 
                                                 workers.push(worker);
                                                 _ = task_tx.send(task);
@@ -227,7 +233,7 @@ impl<T: 'static + Sync + Send> ThreadPool<T> {
             tokio::spawn(async move {
                 for i in 0..default_size {
                     let (task_tx, task_rx) = crossbeam_channel::bounded(queue_size);
-                    let worker = Worker::new(i, task_rx);
+                    let worker = Worker::new(i, stack_size, task_rx);
 
                     workers.push(worker);
                     task_senders.push(task_tx);
@@ -288,7 +294,7 @@ impl<T: 'static + Sync + Send> ThreadPool<T> {
                             debug!("create new worker: {}", new_worker_id);
 
                             let (task_tx, task_rx) = crossbeam_channel::bounded(queue_size);
-                            let worker = Worker::new(new_worker_id, task_rx);
+                            let worker = Worker::new(new_worker_id, stack_size, task_rx);
 
                             workers.push(worker);
                             _ = task_tx.try_send(Some(task));
@@ -309,7 +315,7 @@ impl<T: 'static + Sync + Send> ThreadPool<T> {
                                                 debug!("create more worker: {}", new_worker_id);
                                                 let (task_tx, task_rx) =
                                                     crossbeam_channel::bounded(queue_size);
-                                                let worker = Worker::new(new_worker_id, task_rx);
+                                                let worker = Worker::new(new_worker_id, stack_size, task_rx);
 
                                                 workers.push(worker);
                                                 _ = task_tx.try_send(task);
@@ -349,7 +355,7 @@ impl<T: 'static + Sync + Send> ThreadPool<T> {
         }
     }
 
-    #[allow(unused)]
+    #[allow(dead_code)]
     pub fn execute<F>(&self, f: F) -> anyhow::Result<T>
         where
             F: FnOnce() -> T + Send + Sync + 'static,
@@ -373,8 +379,9 @@ impl<T: 'static + Sync + Send> ThreadPool<T> {
     }
 
     /// used only for benchmark, cause single thread runtime will not wait for shutdown of all threads.
-    pub(crate) async fn exit(&mut self) {
-        self.inner_tx.send_async(None).await.unwrap();
+    pub async fn shutdown(&mut self) {
+        // may shut down manually, so ignore the result.
+        _ = self.inner_tx.try_send(None);
         if let Some(notify) = self.shutdown_notify.take() {
             notify.await.unwrap();
         }
@@ -383,6 +390,6 @@ impl<T: 'static + Sync + Send> ThreadPool<T> {
 
 impl<T: Send + Sync + 'static> Drop for ThreadPool<T> {
     fn drop(&mut self) {
-        futures_lite::future::block_on(self.exit());
+        futures_lite::future::block_on(self.shutdown());
     }
 }

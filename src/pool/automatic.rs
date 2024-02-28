@@ -34,6 +34,7 @@ impl<T> Task<T> {
 pub struct ThreadPool<T: Send + Sync + 'static> {
     max_size: usize,
     scale_size: usize,
+    stack_size: usize,
     current_size: Arc<AtomicUsize>,
     inner_tx: flume::Sender<Task<T>>,
     inner_rx: flume::Receiver<Task<T>>,
@@ -43,12 +44,13 @@ impl<T> ThreadPool<T>
     where
         T: Send + Sync + 'static,
 {
-    pub fn new(scale_size: usize, max_size: usize, queue_size: usize) -> Self {
+    pub fn new(scale_size: usize, queue_size: usize, max_size: usize, stack_size: usize) -> Self {
         let (inner_tx, inner_rx) = flume::bounded(queue_size);
         let current_size = Arc::new(AtomicUsize::new(0));
         Self {
             max_size,
             scale_size,
+            stack_size,
             current_size,
             inner_tx,
             inner_rx,
@@ -84,7 +86,7 @@ impl<T> ThreadPool<T>
         };
     }
 
-    #[allow(unused)]
+    #[allow(dead_code)]
     pub(self) async fn submit_immediately<F>(&self, f: F) -> anyhow::Result<T>
         where
             F: FnOnce() -> T + Send + Sync + 'static,
@@ -126,7 +128,7 @@ impl<T> ThreadPool<T>
         };
     }
 
-    #[allow(unused)]
+    #[allow(dead_code)]
     pub fn execute<F>(&self, f: F) -> anyhow::Result<T>
         where
             F: FnOnce() -> T + Send + Sync + 'static,
@@ -144,7 +146,7 @@ impl<T> ThreadPool<T>
         if current < self.max_size {
             _ = thread::Builder::new()
                 .name(format!("thread-pool-worker-{:03?}", current))
-                .stack_size(1024 * 1024 * 2)
+                .stack_size(self.stack_size)
                 .spawn(move || {
                     loop {
                         // this number is from golang scheduler.
