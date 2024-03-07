@@ -1,69 +1,69 @@
-use std::io::Write;
+use std::thread;
 
 use blocking::unblock;
+use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
+
 use coordinator::pool;
-use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion};
-
-pub fn test_manual() -> u64 {
-    let res = tokio::runtime::Builder::new_current_thread()
-        .enable_time()
-        .build()
-        .unwrap()
-        .block_on(async move {
-            let mut pool = pool::Builder::new()
-                .scale_size(200)
-                .queue_size(102400)
-                .maximum_size(400)
-                .background(false)
-                .build_manual();
-
-            let n: u64 = 1500;
-            let mut total: u64 = 0;
-            for _i in 0..n {
-                let res = pool
-                    .submit(Box::new(move || simulate_block_call()))
-                    .await
-                    .unwrap();
-                total += res;
-            }
-            pool.shutdown().await;
-            return total;
-        });
-    return res;
-}
 
 pub fn test_automatic() -> u64 {
-    return tokio::runtime::Builder::new_current_thread()
+    return tokio::runtime::Builder::new_multi_thread()
         .build()
         .unwrap()
         .block_on(async move {
+            let m = 1024;
+            let n = 10;
             let pool = pool::Builder::new()
-                .scale_size(200)
-                .queue_size(102400)
-                .maximum_size(400)
+                .scale_size(60)
+                .queue_size(10240000)
+                .maximum_size(80)
                 .build_automatic();
 
-            let n: u64 = 1500;
+            let (tx, rx) = flume::bounded(m);
+            for _ in 0..m {
+                let tx = tx.clone();
+                let submitter = pool.new_submitter();
+                tokio::spawn(async move {
+                    let mut total = 0;
+                    for _i in 0..n {
+                        total += submitter
+                            .submit(move || simulate_block_call())
+                            .await;
+                    }
+                    tx.send(total).unwrap();
+                });
+            }
+
             let mut total = 0;
-            for _i in 0..n {
-                total += pool
-                    .submit(Box::new(move || simulate_block_call()))
-                    .await
-                    .unwrap();
+            for _ in 0..m {
+                total += rx.recv_async().await.unwrap();
             }
             return total;
         });
 }
 
 pub fn test_unblocking() -> u64 {
-    return tokio::runtime::Builder::new_current_thread()
+    return tokio::runtime::Builder::new_multi_thread()
         .build()
         .unwrap()
         .block_on(async move {
-            let n: u64 = 1500;
+            let m = 1024;
+            let n = 10;
+
+            let (tx, rx) = flume::bounded(m);
+            for _ in 0..m {
+                let tx = tx.clone();
+                tokio::spawn(async move {
+                    let mut total = 0;
+                    for _i in 0..n {
+                        total += unblock(move || simulate_block_call()).await;
+                    }
+                    tx.send(total).unwrap();
+                });
+            }
+
             let mut total = 0;
-            for _i in 0..n {
-                total += unblock(move || simulate_block_call()).await;
+            for _ in 0..m {
+                total += rx.recv_async().await.unwrap();
             }
             return total;
         });
@@ -111,31 +111,19 @@ pub fn test_rayon() -> u64 {
 }
 
 pub fn simulate_block_call() -> u64 {
-    let t = chrono::Local::now().timestamp_nanos_opt().unwrap() as u64;
-    let path = format!("block_test/{}", t);
-    let mut file = std::fs::OpenOptions::new()
-        .create(true)
-        .write(true)
-        .open(&path)
-        .unwrap();
-    file.write(path.as_bytes()).unwrap();
-    return t;
+    thread::park_timeout(std::time::Duration::from_micros(5));
+    return 1;
 }
 
 fn bench_pools(c: &mut Criterion) {
     let mut group = c.benchmark_group("ThreadPool");
-    group.sample_size(10);
-    group.bench_function(BenchmarkId::new("Manual", ""), |b| b.iter(|| test_manual()));
+    group.sample_size(20);
     group.bench_function(BenchmarkId::new("Automatic", ""), |b| {
         b.iter(|| test_automatic())
     });
     group.bench_function(BenchmarkId::new("Unblocking", ""), |b| {
         b.iter(|| test_unblocking())
     });
-    // group.bench_function(BenchmarkId::new("Threadpool", ""),
-    //                      |b| b.iter(|| test_thread_pool()));
-    // group.bench_function(BenchmarkId::new("Rayon", ""),
-    //                      |b| b.iter(|| test_rayon()));
     group.finish();
 }
 

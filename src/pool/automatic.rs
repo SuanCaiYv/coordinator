@@ -4,33 +4,48 @@ use std::{
     time::Duration,
 };
 
-use async_oneshot::Sender as OneshotSender;
+use crate::pool::Task;
 use flume::TrySendError;
+use thread_local::ThreadLocal;
 use tracing::warn;
 
-pub(self) struct Task<T: 'static> {
-    pub(self) f: Box<dyn FnOnce() -> T + Send + Sync + 'static>,
-    pub(self) sender: OneshotSender<anyhow::Result<T>>,
+pub struct ThreadPool<T>
+where
+    T: Send + Sync + 'static,
+{
+    scheduler: Arc<ThreadLocal<ThreadPoolScheduler<T>>>,
+    max_size: usize,
+    scale_size: usize,
+    queue_size: usize,
+    stack_size: usize,
 }
 
-impl<T> Task<T> {
-    pub(self) fn new<F>(f: F, sender: OneshotSender<anyhow::Result<T>>) -> Self
-        where
-            F: FnOnce() -> T + Send + Sync + 'static,
-    {
+impl<T> ThreadPool<T>
+where
+    T: Send + Sync + 'static,
+{
+    pub fn new(scale_size: usize, queue_size: usize, max_size: usize, stack_size: usize) -> Self {
         Self {
-            f: Box::new(f),
-            sender,
+            scheduler: Arc::new(ThreadLocal::new()),
+            max_size,
+            scale_size,
+            queue_size,
+            stack_size,
         }
     }
 
-    pub(self) fn run(mut self) {
-        let res = (self.f)();
-        _ = self.sender.send(Ok(res));
+    pub fn new_submitter(&self) -> Submitter<T> {
+        Submitter {
+            pool: self.scheduler.clone(),
+            scale_size: self.scale_size,
+            queue_size: self.queue_size,
+            maximum_size: self.max_size,
+            stack_size: self.stack_size,
+        }
     }
 }
 
-pub struct ThreadPool<T: Send + Sync + 'static> {
+pub(self) struct ThreadPoolScheduler<T: Send + Sync + 'static> {
     max_size: usize,
     scale_size: usize,
     stack_size: usize,
@@ -39,11 +54,16 @@ pub struct ThreadPool<T: Send + Sync + 'static> {
     inner_rx: flume::Receiver<Task<T>>,
 }
 
-impl<T> ThreadPool<T>
-    where
-        T: Send + Sync + 'static,
+impl<T> ThreadPoolScheduler<T>
+where
+    T: Send + Sync + 'static,
 {
-    pub fn new(scale_size: usize, queue_size: usize, max_size: usize, stack_size: usize) -> Self {
+    pub(self) fn new(
+        scale_size: usize,
+        queue_size: usize,
+        max_size: usize,
+        stack_size: usize,
+    ) -> Self {
         let (inner_tx, inner_rx) = flume::bounded(queue_size);
         let current_size = Arc::new(AtomicUsize::new(0));
         Self {
@@ -56,81 +76,41 @@ impl<T> ThreadPool<T>
         }
     }
 
-    pub async fn submit<F>(&self, f: F) -> anyhow::Result<T>
-        where
-            F: FnOnce() -> T + Send + Sync + 'static,
+    pub(self) async fn submit<F>(&self, f: F) -> T
+    where
+        F: FnOnce() -> T + Send + Sync + 'static,
     {
         let (sender, receiver) = async_oneshot::oneshot();
         let mut task = Task::new(f, sender);
 
-        if self.current_size.load(std::sync::atomic::Ordering::Relaxed) < self.scale_size {
+        if self.current_size.load(std::sync::atomic::Ordering::Acquire) < self.scale_size {
             self.new_thread();
-            self.inner_tx.send_async(task).await?;
+            if let Err(e) = self.inner_tx.send_async(task).await {
+                warn!("dispatch task error, run directly");
+                e.0.run();
+            }
         } else if let Err(e) = self.inner_tx.try_send(task) {
             task = match e {
                 TrySendError::Full(task) => task,
                 TrySendError::Disconnected(task) => task,
             };
-            if self.current_size.load(std::sync::atomic::Ordering::Relaxed) < self.max_size {
+            if self.current_size.load(std::sync::atomic::Ordering::Acquire) < self.max_size {
                 self.new_thread();
-                self.inner_tx.send_async(task).await?;
-            } else {
-                warn!("thread pool is full, run directly");
-                task.run();
-            }
-        }
-        return match receiver.await {
-            Ok(res) => res,
-            Err(_) => Err(anyhow::anyhow!("task receiver error")),
-        };
-    }
-
-    #[allow(dead_code)]
-    pub(self) async fn submit_immediately<F>(&self, f: F) -> anyhow::Result<T>
-        where
-            F: FnOnce() -> T + Send + Sync + 'static,
-    {
-        let (sender, receiver) = async_oneshot::oneshot();
-        let task = Task::new(f, sender);
-
-        if self.current_size.load(std::sync::atomic::Ordering::Relaxed) < self.scale_size {
-            self.new_thread();
-            if let Err(e) = self.inner_tx.try_send(task) {
-                let task = match e {
-                    TrySendError::Full(task) => task,
-                    TrySendError::Disconnected(task) => task,
-                };
-                self.inner_tx.send_async(task).await?;
-            }
-        } else if let Err(e) = self.inner_tx.try_send(task) {
-            let task = match e {
-                TrySendError::Full(task) => task,
-                TrySendError::Disconnected(task) => task,
-            };
-            if self.current_size.load(std::sync::atomic::Ordering::Relaxed) < self.max_size {
-                self.new_thread();
-                if let Err(e) = self.inner_tx.try_send(task) {
-                    let task = match e {
-                        TrySendError::Full(task) => task,
-                        TrySendError::Disconnected(task) => task,
-                    };
-                    self.inner_tx.send_async(task).await?;
+                if let Err(e) = self.inner_tx.send_async(task).await {
+                    warn!("dispatch task with more threads error, run directly");
+                    e.0.run();
                 }
             } else {
                 warn!("thread pool is full, run directly");
                 task.run();
             }
         }
-        return match receiver.await {
-            Ok(res) => res,
-            Err(_) => Err(anyhow::anyhow!("task receiver error")),
-        };
+        receiver.await.unwrap()
     }
 
-    #[allow(dead_code)]
-    pub fn execute<F>(&self, f: F) -> anyhow::Result<T>
-        where
-            F: FnOnce() -> T + Send + Sync + 'static,
+    pub(self) fn execute<F>(&self, f: F) -> T
+    where
+        F: FnOnce() -> T + Send + Sync + 'static,
     {
         return futures_lite::future::block_on(self.submit(f));
     }
@@ -140,7 +120,7 @@ impl<T> ThreadPool<T>
         let inner_rx = self.inner_rx.clone();
         let current_size = self.current_size.clone();
 
-        let current = current_size.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let current = current_size.fetch_add(1, std::sync::atomic::Ordering::AcqRel);
 
         if current < self.max_size {
             _ = thread::Builder::new()
@@ -159,24 +139,61 @@ impl<T> ThreadPool<T>
                             }
                         }
                     }
-                    current_size.fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
+                    current_size.fetch_sub(1, std::sync::atomic::Ordering::AcqRel);
                 });
         } else {
             self.current_size
-                .fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
+                .fetch_sub(1, std::sync::atomic::Ordering::AcqRel);
         }
     }
 }
 
-impl<T: Send + Sync + 'static> Clone for ThreadPool<T> {
-    fn clone(&self) -> Self {
-        Self {
-            max_size: self.max_size,
-            scale_size: self.scale_size,
-            stack_size: self.stack_size,
-            current_size: self.current_size.clone(),
-            inner_tx: self.inner_tx.clone(),
-            inner_rx: self.inner_rx.clone(),
-        }
+#[derive(Clone)]
+pub struct Submitter<T>
+where
+    T: Send + Sync + 'static,
+{
+    pool: Arc<ThreadLocal<ThreadPoolScheduler<T>>>,
+    scale_size: usize,
+    queue_size: usize,
+    maximum_size: usize,
+    stack_size: usize,
+}
+
+impl<T> Submitter<T>
+where
+    T: Send + Sync + 'static,
+{
+    pub async fn submit<F>(&self, f: F) -> T
+    where
+        F: FnOnce() -> T + Send + Sync + 'static,
+    {
+        self.pool
+            .get_or(|| {
+                ThreadPoolScheduler::new(
+                    self.scale_size,
+                    self.queue_size,
+                    self.maximum_size,
+                    self.stack_size,
+                )
+            })
+            .submit(f)
+            .await
+    }
+
+    pub fn execute<F>(&self, f: F) -> T
+    where
+        F: FnOnce() -> T + Send + Sync + 'static,
+    {
+        self.pool
+            .get_or(|| {
+                ThreadPoolScheduler::new(
+                    self.scale_size,
+                    self.queue_size,
+                    self.maximum_size,
+                    self.stack_size,
+                )
+            })
+            .execute(f)
     }
 }

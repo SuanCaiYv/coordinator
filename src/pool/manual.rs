@@ -3,33 +3,12 @@ use std::{
     time::Duration,
 };
 
-use async_oneshot::{Sender as OneshotSender, Receiver as OneshotReceiver};
+use async_oneshot::{Receiver as OneshotReceiver};
 use crossbeam_channel::TrySendError;
 use flume::Sender;
 use sysinfo::{System, SystemExt};
 use tracing::{debug, warn};
-
-pub(self) struct Task<T: 'static> {
-    pub(self) f: Box<dyn FnOnce() -> T + Send + Sync + 'static>,
-    pub(self) sender: OneshotSender<T>,
-}
-
-impl<T> Task<T> {
-    pub(self) fn new<F>(f: F, sender: OneshotSender<T>) -> Self
-        where
-            F: FnOnce() -> T + Send + Sync + 'static,
-    {
-        Self {
-            f: Box::new(f),
-            sender,
-        }
-    }
-
-    pub(self) fn run(mut self) {
-        let res = (self.f)();
-        _ = self.sender.send(res);
-    }
-}
+use crate::pool::Task;
 
 pub(self) struct Worker {
     id: usize,

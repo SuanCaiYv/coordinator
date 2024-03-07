@@ -1,6 +1,28 @@
 pub mod automatic;
 pub mod manual;
 
+pub(self) struct Task<T: 'static> {
+    pub(self) f: Box<dyn FnOnce() -> T + Send + Sync + 'static>,
+    pub(self) sender: async_oneshot::Sender<T>,
+}
+
+impl<T> Task<T> {
+    pub(self) fn new<F>(f: F, sender: async_oneshot::Sender<T>) -> Self
+        where
+            F: FnOnce() -> T + Send + Sync + 'static,
+    {
+        Self {
+            f: Box::new(f),
+            sender,
+        }
+    }
+
+    pub(self) fn run(mut self) {
+        let res = (self.f)();
+        _ = self.sender.send(res);
+    }
+}
+
 pub struct Builder {
     scale_size: usize,
     queue_size: usize,
