@@ -6,6 +6,7 @@ use std::{
 
 use crate::pool::Task;
 use flume::TrySendError;
+use parking_lot::RwLock;
 use thread_local::ThreadLocal;
 use tracing::warn;
 
@@ -18,6 +19,7 @@ where
     scale_size: usize,
     queue_size: usize,
     stack_size: usize,
+    workers_rx: Arc<RwLock<Vec<flume::Receiver<Task<T>>>>>,
 }
 
 impl<T> ThreadPool<T>
@@ -31,6 +33,7 @@ where
             scale_size,
             queue_size,
             stack_size,
+            workers_rx: Arc::new(RwLock::new(Vec::new())),
         }
     }
 
@@ -41,6 +44,7 @@ where
             queue_size: self.queue_size,
             maximum_size: self.max_size,
             stack_size: self.stack_size,
+            outer_rxs: self.workers_rx.clone(),
         }
     }
 }
@@ -52,6 +56,7 @@ pub(self) struct ThreadPoolScheduler<T: Send + Sync + 'static> {
     current_size: Arc<AtomicUsize>,
     inner_tx: flume::Sender<Task<T>>,
     inner_rx: flume::Receiver<Task<T>>,
+    outer_rxs: Arc<RwLock<Vec<flume::Receiver<Task<T>>>>>,
 }
 
 impl<T> ThreadPoolScheduler<T>
@@ -63,6 +68,7 @@ where
         queue_size: usize,
         max_size: usize,
         stack_size: usize,
+        outer_rxs: Arc<RwLock<Vec<flume::Receiver<Task<T>>>>>,
     ) -> Self {
         let (inner_tx, inner_rx) = flume::bounded(queue_size);
         let current_size = Arc::new(AtomicUsize::new(0));
@@ -73,6 +79,7 @@ where
             current_size,
             inner_tx,
             inner_rx,
+            outer_rxs,
         }
     }
 
@@ -118,6 +125,7 @@ where
     #[inline(always)]
     pub(self) fn new_thread(&self) {
         let inner_rx = self.inner_rx.clone();
+        let outer_rxs = self.outer_rxs.clone();
         let current_size = self.current_size.clone();
 
         let current = current_size.fetch_add(1, std::sync::atomic::Ordering::AcqRel);
@@ -128,8 +136,39 @@ where
                 .stack_size(self.stack_size)
                 .spawn(move || {
                     loop {
+                        if let Ok(task) = inner_rx.try_recv() {
+                            task.run();
+                            continue;
+                        }
+
+                        if let Ok(task) = inner_rx.recv_timeout(Duration::from_millis(6100)) {
+                            task.run();
+                            continue;
+                        }
+
+                        let mut peer_tasks = Vec::new();
+                        {
+                            let outer_rxs = outer_rxs.read();
+                            let list = &*outer_rxs;
+                            for rx in list.iter() {
+                                match rx.try_recv() {
+                                    Ok(task) => {
+                                        peer_tasks.push(task);
+                                    }
+                                    Err(_) => {}
+                                }
+                            }
+                        }
+                        let mut flag = false;
+                        for task in peer_tasks {
+                            flag = true;
+                            task.run();
+                        }
+                        if flag {
+                            continue;
+                        }
+
                         // this number is from golang scheduler.
-                        // todo, make as alternative.
                         match inner_rx.recv_timeout(Duration::from_secs(61)) {
                             Ok(task) => {
                                 task.run();
@@ -158,6 +197,7 @@ where
     queue_size: usize,
     maximum_size: usize,
     stack_size: usize,
+    outer_rxs: Arc<RwLock<Vec<flume::Receiver<Task<T>>>>>,
 }
 
 impl<T> Submitter<T>
@@ -170,12 +210,15 @@ where
     {
         self.pool
             .get_or(|| {
-                ThreadPoolScheduler::new(
+                let pool = ThreadPoolScheduler::new(
                     self.scale_size,
                     self.queue_size,
                     self.maximum_size,
                     self.stack_size,
-                )
+                    self.outer_rxs.clone(),
+                );
+                self.outer_rxs.write().push(pool.inner_rx.clone());
+                pool
             })
             .submit(f)
             .await
@@ -187,12 +230,15 @@ where
     {
         self.pool
             .get_or(|| {
-                ThreadPoolScheduler::new(
+                let pool = ThreadPoolScheduler::new(
                     self.scale_size,
                     self.queue_size,
                     self.maximum_size,
                     self.stack_size,
-                )
+                    self.outer_rxs.clone(),
+                );
+                self.outer_rxs.write().push(pool.inner_rx.clone());
+                pool
             })
             .execute(f)
     }

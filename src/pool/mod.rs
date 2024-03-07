@@ -1,5 +1,4 @@
 pub mod automatic;
-pub mod manual;
 
 pub(self) struct Task<T: 'static> {
     pub(self) f: Box<dyn FnOnce() -> T + Send + Sync + 'static>,
@@ -77,11 +76,7 @@ impl Builder {
         self
     }
 
-    pub fn build_manual<T: Send + Sync>(self) -> manual::ThreadPool<T> {
-        manual::ThreadPool::new(self.scale_size, self.queue_size, self.maximum_size, self.stack_size, self.background)
-    }
-
-    pub fn build_automatic<T: Send + Sync>(self) -> automatic::ThreadPool<T> {
+    pub fn build<T: Send + Sync>(self) -> automatic::ThreadPool<T> {
         automatic::ThreadPool::new(self.scale_size, self.queue_size, self.maximum_size, self.stack_size)
     }
 }

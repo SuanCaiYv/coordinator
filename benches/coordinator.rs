@@ -16,7 +16,7 @@ pub fn test_automatic() -> u64 {
                 .scale_size(60)
                 .queue_size(10240000)
                 .maximum_size(80)
-                .build_automatic();
+                .build();
 
             let (tx, rx) = flume::bounded(m);
             for _ in 0..m {
@@ -117,7 +117,7 @@ pub fn simulate_block_call() -> u64 {
 
 fn bench_pools(c: &mut Criterion) {
     let mut group = c.benchmark_group("ThreadPool");
-    group.sample_size(20);
+    group.sample_size(50);
     group.bench_function(BenchmarkId::new("Automatic", ""), |b| {
         b.iter(|| test_automatic())
     });
