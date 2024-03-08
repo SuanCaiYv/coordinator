@@ -11,8 +11,8 @@ use thread_local::ThreadLocal;
 use tracing::warn;
 
 pub struct ThreadPool<T>
-where
-    T: Send + Sync + 'static,
+    where
+        T: Send + Sync + 'static,
 {
     scheduler: Arc<ThreadLocal<ThreadPoolScheduler<T>>>,
     max_size: usize,
@@ -23,8 +23,8 @@ where
 }
 
 impl<T> ThreadPool<T>
-where
-    T: Send + Sync + 'static,
+    where
+        T: Send + Sync + 'static,
 {
     pub fn new(scale_size: usize, queue_size: usize, max_size: usize, stack_size: usize) -> Self {
         Self {
@@ -61,8 +61,8 @@ pub(self) struct ThreadPoolScheduler<T: Send + Sync + 'static> {
 }
 
 impl<T> ThreadPoolScheduler<T>
-where
-    T: Send + Sync + 'static,
+    where
+        T: Send + Sync + 'static,
 {
     pub(self) fn new(
         scale_size: usize,
@@ -85,8 +85,8 @@ where
     }
 
     pub(self) async fn submit<F>(&self, f: F) -> T
-    where
-        F: FnOnce() -> T + Send + Sync + 'static,
+        where
+            F: FnOnce() -> T + Send + Sync + 'static,
     {
         let (sender, receiver) = async_oneshot::oneshot();
         let mut task = Task::new(f, sender);
@@ -117,8 +117,8 @@ where
     }
 
     pub(self) fn execute<F>(&self, f: F) -> T
-    where
-        F: FnOnce() -> T + Send + Sync + 'static,
+        where
+            F: FnOnce() -> T + Send + Sync + 'static,
     {
         return futures_lite::future::block_on(self.submit(f));
     }
@@ -188,10 +188,9 @@ where
     }
 }
 
-#[derive(Clone)]
 pub struct Submitter<T>
-where
-    T: Send + Sync + 'static,
+    where
+        T: Send + Sync + 'static,
 {
     pool: Arc<ThreadLocal<ThreadPoolScheduler<T>>>,
     scale_size: usize,
@@ -202,12 +201,12 @@ where
 }
 
 impl<T> Submitter<T>
-where
-    T: Send + Sync + 'static,
+    where
+        T: Send + Sync + 'static,
 {
     pub async fn submit<F>(&self, f: F) -> T
-    where
-        F: FnOnce() -> T + Send + Sync + 'static,
+        where
+            F: FnOnce() -> T + Send + Sync + 'static,
     {
         self.pool
             .get_or(|| {
@@ -226,8 +225,8 @@ where
     }
 
     pub fn execute<F>(&self, f: F) -> T
-    where
-        F: FnOnce() -> T + Send + Sync + 'static,
+        where
+            F: FnOnce() -> T + Send + Sync + 'static,
     {
         self.pool
             .get_or(|| {
@@ -242,5 +241,20 @@ where
                 pool
             })
             .execute(f)
+    }
+}
+
+impl<T> Clone for Submitter<T>
+    where
+        T: Send + Sync + 'static, {
+    fn clone(&self) -> Self {
+        Self {
+            pool: self.pool.clone(),
+            scale_size: self.scale_size,
+            queue_size: self.queue_size,
+            maximum_size: self.maximum_size,
+            stack_size: self.stack_size,
+            outer_rxs: self.outer_rxs.clone(),
+        }
     }
 }
