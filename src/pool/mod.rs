@@ -1,3 +1,4 @@
+
 pub mod automatic;
 
 pub(self) struct Task<T: 'static> {
@@ -27,17 +28,15 @@ pub struct Builder {
     queue_size: usize,
     stack_size: usize,
     maximum_size: usize,
-    background: bool,
 }
 
 impl Builder {
     pub fn new() -> Builder {
         Builder {
-            scale_size: 200,
+            scale_size: 40,
             queue_size: 102400,
             stack_size: 1024 * 1024 * 2,
-            maximum_size: 1024,
-            background: false,
+            maximum_size: 80,
         }
     }
 
@@ -66,13 +65,6 @@ impl Builder {
     /// - `maximum_size` - The maximum size of the thread pool.
     pub fn maximum_size(mut self, maximum_size: usize) -> Builder {
         self.maximum_size = maximum_size;
-        self
-    }
-
-    /// - `background` - Whether the thread pool is a background thread.
-    /// If you are using async context, recommend `true`.
-    pub fn background(mut self, background: bool) -> Builder {
-        self.background = background;
         self
     }
 

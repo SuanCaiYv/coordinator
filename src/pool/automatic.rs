@@ -37,6 +37,7 @@ where
         }
     }
 
+    /// you can clone a existing `Submitter`, which is equal to `ThreadPool::new_submitter`.
     pub fn new_submitter(&self) -> Submitter<T> {
         Submitter {
             pool: self.scheduler.clone(),
@@ -141,7 +142,7 @@ where
                             continue;
                         }
 
-                        if let Ok(task) = inner_rx.recv_timeout(Duration::from_millis(6100)) {
+                        if let Ok(task) = inner_rx.recv_timeout(Duration::from_millis(500)) {
                             task.run();
                             continue;
                         }
