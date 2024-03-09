@@ -1,3 +1,4 @@
+use std::sync::Arc;
 use std::thread;
 
 use blocking::unblock;
@@ -70,48 +71,76 @@ pub fn test_unblocking() -> u64 {
 }
 
 pub fn test_thread_pool() -> u64 {
-    return tokio::runtime::Builder::new_current_thread()
+    return tokio::runtime::Builder::new_multi_thread()
         .build()
         .unwrap()
         .block_on(async move {
-            let pool = threadpool::Builder::new().num_threads(200).build();
+            let m = 1024;
+            let n = 10;
+            let pool = threadpool::Builder::new().num_threads(800).build();
 
-            let n: u64 = 1500;
+            let (tx, rx) = flume::bounded(m);
+            for _ in 0..m {
+                let tx = tx.clone();
+                let pool = pool.clone();
+                tokio::spawn(async move {
+                    let mut total = 0;
+                    for _i in 0..n {
+                        let (mut tx, rx) = async_oneshot::oneshot();
+                        pool.execute(move || _ = tx.send(simulate_block_call()));
+                        total += rx.await.unwrap();
+                    }
+                    tx.send(total).unwrap();
+                });
+            }
+
             let mut total = 0;
-            for _i in 0..n {
-                let (mut tx, rx) = async_oneshot::oneshot();
-                pool.execute(move || _ = tx.send(simulate_block_call()));
-                total += rx.await.unwrap();
+            for _ in 0..m {
+                total += rx.recv_async().await.unwrap();
             }
             return total;
         });
 }
 
 pub fn test_rayon() -> u64 {
-    return tokio::runtime::Builder::new_current_thread()
+    return tokio::runtime::Builder::new_multi_thread()
         .build()
         .unwrap()
         .block_on(async move {
+            let m = 1024;
+            let n = 10;
             let pool = rayon::ThreadPoolBuilder::new()
-                .num_threads(200)
+                .num_threads(800)
                 .build()
                 .unwrap();
+            let pool = Arc::new(pool);
 
-            let n: u64 = 1500;
-            let mut total = 0;
-            for _i in 0..n {
-                let (mut tx, rx) = async_oneshot::oneshot();
-                pool.install(move || {
-                    _ = tx.send(simulate_block_call());
+            let (tx, rx) = flume::bounded(m);
+            for _ in 0..m {
+                let tx = tx.clone();
+                let pool = pool.clone();
+                tokio::spawn(async move {
+                    let mut total = 0;
+                    for _i in 0..n {
+                        let (mut tx, rx) = async_oneshot::oneshot();
+                        pool.install(move || {
+                            _ = tx.send(simulate_block_call());
+                        });
+                        total += rx.await.unwrap();
+                    }
+                    tx.send(total).unwrap();
                 });
-                total += rx.await.unwrap();
+            }
+
+            let mut total = 0;
+            for _ in 0..m {
+                total += rx.recv_async().await.unwrap();
             }
             return total;
         });
 }
 
 pub fn simulate_block_call() -> u64 {
-    thread::park_timeout(std::time::Duration::from_micros(5));
     return 1;
 }
 
@@ -122,6 +151,12 @@ fn bench_pools(c: &mut Criterion) {
         b.iter(|| test_automatic())
     });
     group.bench_function(BenchmarkId::new("Unblocking", ""), |b| {
+        b.iter(|| test_unblocking())
+    });
+    group.bench_function(BenchmarkId::new("Threadpool", ""), |b| {
+        b.iter(|| test_automatic())
+    });
+    group.bench_function(BenchmarkId::new("Rayon", ""), |b| {
         b.iter(|| test_unblocking())
     });
     group.finish();
